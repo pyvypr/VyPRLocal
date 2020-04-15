@@ -136,6 +136,8 @@ def get_reversed_string_list(obj, omit_subscripts=False):
         return get_function_name_strings(obj)
     elif type(obj) is ast.Str:
         return [obj.s]
+    elif type(obj) is ast.Tuple:
+        return list(map(lambda item : get_reversed_string_list(item, omit_subscripts=omit_subscripts), obj.elts))
 
 
 def get_attr_name_string(obj, omit_subscripts=False):
@@ -200,7 +202,7 @@ class CFGVertex(object):
                     # nothing else could be changed
                     self._name_changed = []
             elif type(entry) is ast.Raise:
-                self._name_changed = [entry.type.func.id]
+                self._name_changed = [entry.exc.func.id]
             elif type(entry) is ast.Pass:
                 self._name_changed = ["pass"]
             elif type(entry) is ast.Continue:
@@ -234,9 +236,8 @@ class CFGEdge(object):
         if type(self._instruction) is ast.Assign and type(self._instruction.value) in [ast.Call, ast.Expr]:
             # we will have to deal with other kinds of expressions at some point
             if type(self._instruction.targets[0]) is ast.Tuple:
-                self._operates_on = list(map(get_attr_name_string,
-                                             self._instruction.targets[0].elts) + get_function_name_strings(
-                    self._instruction.value))
+                self._operates_on = list(map(get_attr_name_string, self._instruction.targets[0].elts)) +\
+                                    get_function_name_strings(self._instruction.value)
             else:
                 self._operates_on = [get_attr_name_string(self._instruction.targets[0])] + \
                                     get_function_name_strings(self._instruction.value)
@@ -249,7 +250,7 @@ class CFGEdge(object):
         elif type(self._instruction) is ast.Return and type(self._instruction.value) is ast.Call:
             self._operates_on = get_function_name_strings(self._instruction.value)
         elif type(self._instruction) is ast.Raise:
-            self._operates_on = [self._instruction.type.func.id]
+            self._operates_on = [self._instruction.exc.func.id]
         elif type(self._instruction) is ast.Pass:
             self._operates_on = ["pass"]
         else:
@@ -502,8 +503,16 @@ class CFG(object):
                                 [current_conditional[0].test],
                                 closest_loop
                             )
+                            # add to the list of final vertices that need to be connected to the post-conditional vertex
+                            final_conditional_vertices += final_vertices
+                            # add the branching statement
+                            self.branch_initial_statements.append(
+                                ["conditional", current_conditional[0].body[0], branch_number]
+                            )
+                            branch_number += 1
 
                         else:
+                            # the else block contains an instruction that isn't a conditional
                             # pairs.append((current_condition_set, current_conditional))
                             final_vertices = self.process_block(
                                 current_conditional,
@@ -513,14 +522,13 @@ class CFG(object):
                             )
                             # we reached an else block
                             final_else_is_present = True
-
-                        # add to the list of final vertices that need to be connected to the post-conditional vertex
-                        final_conditional_vertices += final_vertices
-                        # add the branching statement
-                        self.branch_initial_statements.append(
-                            ["conditional", current_conditional[0].body[0], branch_number]
-                        )
-                        branch_number += 1
+                            # add to the list of final vertices that need to be connected to the post-conditional vertex
+                            final_conditional_vertices += final_vertices
+                            # add the branching statement
+                            self.branch_initial_statements.append(
+                                ["conditional", current_conditional[0], branch_number]
+                            )
+                            branch_number += 1
 
                     elif len(current_conditional) > 1:
                         # there are multiple blocks inside the orelse, so we can't treat this like another branch

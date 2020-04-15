@@ -19,8 +19,74 @@ Atoms are generated once states or transitions have been described by calling
 import inspect
 # be careful with versions here...
 from collections import OrderedDict
+import ast
 
 from VyPR.monitor_synthesis import formula_tree
+
+"""
+Function selection.
+"""
+
+
+class Module(object):
+    """
+    Used to point to a module/function in specifications.
+    """
+
+    def __init__(self, module_name):
+        self._module_name = module_name
+
+    def Function(self, function_name):
+        self._function_name = function_name
+        return self
+
+
+class Functions(object):
+    """
+    Given as keys in the initial specification config file dictionary by the developer.
+    """
+
+    def __init__(self, **parameter_dictionary):
+        """
+        Parameters given here, with their values, act as criteria to select a set of functions in a project.
+        Multiple parameter values will be used in conjunction.
+        """
+        # set the parameters given as object parameters that can be used in the search performed by instrumentation
+        self.criteria_dict = parameter_dictionary
+
+    def is_satisfied_by(self, function_ast, scfg):
+        """
+        Given a Function AST, decide whether the criteria defined by this instance are satisfied.
+        :param function_ast:
+        :param scfg:
+        :return: True or False
+        """
+        for criterion_name in self.criteria_dict:
+            if criterion_name == "containing_change_of":
+                vertices = scfg.vertices
+                change_found = False
+                for vertex in vertices:
+                    if self.criteria_dict[criterion_name] in vertex._name_changed:
+                        change_found = True
+                    elif hasattr(vertex, "_structure_obj"):
+                        if type(vertex._structure_obj) is ast.For:
+                            if type(vertex._structure_obj.target) is ast.Tuple:
+                                if (self.criteria_dict[criterion_name] in
+                                        map(lambda item: item.id, vertex._structure_obj.target)):
+                                    change_found = True
+                            else:
+                                if self.criteria_dict[criterion_name] == vertex._structure_obj.target.id:
+                                    change_found = True
+                # if no change was found, this criterion has not been,
+                # so return False because the conjunction is broken
+                if not (change_found):
+                    return False
+        # we found no evidence against satisfaction, so return True
+        return True
+
+    def __repr__(self):
+        return "<%s>" % str(self.criteria_dict)
+
 
 """
 General structure-building classes and methods.
@@ -61,7 +127,7 @@ class Forall(object):
         # note: this is a quick fix, but needs to be modified
         # since dictionaries don't guarantee order
         bind_variable_name = list(bind_variable.keys())[0]
-        #bind_variable_obj = bind_variable.values()[0]
+        # bind_variable_obj = bind_variable.values()[0]
         bind_variable_obj = bind_variable[bind_variable_name]
 
         self.bind_variables = bind_variables

@@ -32,6 +32,123 @@ vypr_module = "."
 VERIFICATION_INSTRUCTION = "verification.send_event"
 LOGS_TO_STDOUT = False
 
+"""
+Specification compilation.
+"""
+
+
+def get_function_asts_in_module(module_ast):
+    """
+    Given a Module AST object, traverse it and find all the functions.
+    :param module_ast:
+    :return: List of function names.
+    """
+    all_function_names = []
+    # map elements of ast to pairs - left hand side is module path, right hand side is ast object
+    stack = list(map(lambda item : ("", item), module_ast.body))
+    while len(stack) > 0:
+        top = stack.pop()
+        module_path = top[0]
+        ast_obj = top[1]
+        if type(ast_obj) is ast.FunctionDef:
+            all_function_names.append(("%s%s" % (top[0], top[1].name), top[1]))
+        elif hasattr(ast_obj, "body"):
+            if type(ast_obj) is ast.If:
+                stack += map(
+                    lambda item : (module_path, item),
+                    ast_obj.body
+                )
+            elif type(ast_obj) is ast.ClassDef:
+                stack += map(
+                    lambda item: ("%s%s%s:" %
+                                  (module_path, "." if (module_path != "" and module_path[-1] != ":") else "",
+                                   ast_obj.name), item),
+                    ast_obj.body
+                )
+    return all_function_names
+
+
+def compile_queries(specification_file):
+    """
+    Given a specification file, complete the syntax and add imports, then inspect the objects
+    used as keys to build the final dictionary structure.
+    :param specification_file:
+    :return: fully-expanded dictionary structure
+    """
+    logger.log("Compiling queries...")
+
+    # load in verification config file
+    # to do this, we read in the existing one, write a temporary one with imports added and import that one
+    # this is to allow users to write specifications without caring about importing anything from QueryBuilding
+    # when we read in the original specification code, we add verification_conf = {} to turn it into valid specification
+    # syntax
+    specification_code = "verification_conf = %s" % open(specification_file, "r").read()
+    # replace empty lists with a fake property
+    fake_property = "[Forall(q = changes('fake_vypr_var')).Check(lambda q : q('fake_vypr_var').equals(True))]"
+    specification_code = specification_code.replace("[]", fake_property)
+    with_imports = "from VyPR.QueryBuilding import *\n%s" % specification_code
+    with open("VyPR_queries_with_imports.py", "w") as h:
+        h.write(with_imports)
+
+    # we now import the specification file
+    from VyPR_queries_with_imports import verification_conf
+
+    # this hierarchy will be populated as functions are found in the project that satisfy requirements
+    final_hierarchy = {}
+
+    # finally, we process the keys of the verification_conf dictionary
+    # these keys are objects representing searches we should perform to generate the final expanded specification
+    # with fully-qualified module names
+    # we have this initial step to enable developers to write more sophisticated selection criteria the functions
+    # to which they want to apply a query
+
+    # we go through each function in the project we're instrumenting, check if there's a key in the initial
+    # configuration file whose criteria are fulfilled by the function and, if so, add to the hierarchy
+    for (root, directories, files) in os.walk("."):
+        for file in files:
+            # read in the file, traverse its AST structure to find all the functions and then determine
+            # whether it satisfies a function selector
+            # only consider Python files
+            filename = os.path.join(root, file)
+            module_name = "%s%s" % (root[1:].replace("/", ""), file.replace(".py", ""))
+            if (filename[-3:] == ".py"
+                    and "VyPR" not in filename
+                    and "venv" not in filename):
+                # traverse the AST structure
+                code = open(filename, "r").read()
+                module_asts = ast.parse(code)
+                function_asts = get_function_asts_in_module(module_asts)
+                # process each function
+                for (function_name, function_ast) in function_asts:
+                    # construct the SCFG
+                    scfg = CFG()
+                    scfg.process_block(function_ast.body)
+                    # process each function selector
+                    for function_selector in verification_conf:
+                        if type(function_selector) is Functions:
+                            if function_selector.is_satisfied_by(function_ast, scfg):
+                                # add to the final hierarchy
+                                if not(final_hierarchy.get(module_name)):
+                                    final_hierarchy[module_name] = {}
+                                if not(final_hierarchy[module_name].get(function_name)):
+                                    final_hierarchy[module_name][function_name] = verification_conf[function_selector]
+                                else:
+                                    final_hierarchy[module_name][function_name] += verification_conf[function_selector]
+                        elif type(function_selector) is Module:
+                            if (module_name == function_selector._module_name
+                                    and function_name == function_selector._function_name):
+                                # add to the final hierarchy
+                                if not (final_hierarchy.get(module_name)):
+                                    final_hierarchy[module_name] = {}
+                                if not (final_hierarchy[module_name].get(function_name)):
+                                    final_hierarchy[module_name][function_name] = verification_conf[function_selector]
+                                else:
+                                    final_hierarchy[module_name][function_name] += verification_conf[function_selector]
+
+    print(final_hierarchy)
+
+    return final_hierarchy
+
 
 class InstrumentationLog(object):
     """
@@ -165,7 +282,6 @@ def compute_binding_space(quantifier_sequence, scfg, reachability_map, current_b
                                 vertex._structure_obj.target.id == variable_changed):
                             # the variable we're looking for was found as a simple loop variable
                             qd.append(vertex)
-                            print("adding loop vertex to static binding")
                         elif (type(vertex._structure_obj.target) is ast.Tuple and
                               variable_changed in list(map(lambda item: item.id, vertex._structure_obj.target))):
                             # the loop variable we're looking for was found inside a tuple
@@ -469,8 +585,8 @@ def instrument_point_state(state, name, point, binding_space_indices,
                     queue_ast.col_offset = edge._instruction.col_offset
                     index_in_block = parent_block.index(edge._instruction)
                     # insert instruments in reverse order
-                    parent_block.insert(index_in_block + 1, queue_ast)
-                    parent_block.insert(index_in_block + 1, record_state_ast)
+                    parent_block.insert(index_in_block, queue_ast)
+                    parent_block.insert(index_in_block, record_state_ast)
         else:
             # we're instrumenting a normal vertex where there is an explicit instruction
             logger.log("Not source or destination state - performing normal instrumentation.")
@@ -825,11 +941,6 @@ if __name__ == "__main__":
     VERIFICATION_INSTRUCTION = "vypr.send_event"
     # VERIFICATION_INSTRUCTION = "print"
 
-    # first, check that the verdict server is reachable
-    if not (is_verdict_server_reachable()):
-        print("Verdict server is not reachable.  Ending instrumentation - nothing has been done.")
-        exit()
-
     # initialise instrumentation logger
     logger = InstrumentationLog(LOGS_TO_STDOUT)
     # set up the file handle
@@ -847,20 +958,13 @@ if __name__ == "__main__":
                     os.remove(f.replace(".py.inst", BYTECODE_EXTENSION))
                     logger.log("Reset file %s to uninstrumented version." % f)
 
-    logger.log("Importing PyCFTL queries...")
-    # load in verification config file
-    # to do this, we read in the existing one, write a temporary one with imports added and import that one
-    # this is to allow users to write specifications without caring about importing anything from QueryBuilding
-    specification_code = open("VyPR_queries.py", "r").read()
-    # replace empty lists with a fake property
-    fake_property = "[Forall(q = changes('fake_vypr_var')).Check(lambda q : q('fake_vypr_var').equals(True))]"
-    specification_code = specification_code.replace("[]", fake_property)
-    with_imports = "from VyPR.QueryBuilding import *\n%s" % specification_code
-    with open("VyPR_queries_with_imports.py", "w") as h:
-        h.write(with_imports)
-    from VyPR_queries_with_imports import verification_conf
-
+    verification_conf = compile_queries("VyPR_queries.py")
     verified_modules = verification_conf.keys()
+
+    # first, check that the verdict server is reachable
+    if not (is_verdict_server_reachable()):
+        print("Verdict server is not reachable.  Ending instrumentation - nothing has been done.")
+        exit()
 
     # for each verified function, find the file in which it is defined
 
@@ -984,7 +1088,6 @@ if __name__ == "__main__":
 
                 reachability_map = construct_reachability_map(scfg)
                 bindings = compute_binding_space(formula_structure, scfg, reachability_map)
-                print(bindings)
 
                 logger.log("Set of static bindings computed is")
                 logger.log(str(bindings))
